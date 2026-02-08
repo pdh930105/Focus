@@ -1,9 +1,9 @@
 # ***Focus***: A Streaming Concentration Architecture for Efficient Vision-Language Models
+🏆 Presented at HPCA 2026 | **Best Paper Candidate**
 
 [![arXiv](https://img.shields.io/badge/arXiv-2512.14661-b31b1b)](https://arxiv.org/abs/2512.14661)
 [![HPCA 2026](https://img.shields.io/badge/Accepted-HPCA%202026-blue)](https://conf.researchr.org/home/hpca-2026)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
 
 
 ***Focus*** is a hardware–algorithm co-designed architecture that accelerates Vision-Language Model (VLM) inference by eliminating redundancy in visual tokens. It introduces a **multilevel concentration** pipeline—covering semantic-, block-, and vector-level redundancy—to reorganize VLM inputs into a hardware-friendly, locality-preserving format. An overview of ***Focus*** design is shown below
