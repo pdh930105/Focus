@@ -1,3 +1,5 @@
+export LD_PRELOAD=/opt/nvidia/nsight-compute/2025.3.0/host/linux-desktop-glibc_2_11_3-x64/libstdc++.so.6
+
 TRACE_META_DIR="./output"
 
 # Check arguments

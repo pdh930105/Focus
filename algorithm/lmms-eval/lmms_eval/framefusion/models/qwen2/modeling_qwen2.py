@@ -6,12 +6,13 @@ from ...utils import scaled_dot_product_attention
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.qwen2.modeling_qwen2 import (
-    QWEN2_INPUTS_DOCSTRING,
     apply_rotary_pos_emb,
-    logger,
     repeat_kv,
 )
+from transformers.utils import logging as transformers_logging
 from transformers.utils.doc import add_start_docstrings_to_model_forward
+
+logger = transformers_logging.get_logger(__name__)
 
 
 def Qwen2DecoderLayer_merge_then_prune_by_cost_forward(
@@ -200,7 +201,7 @@ def Qwen2SdpaAttention_merge_then_prune_by_cost_forward(
     return attn_output, attn_weights, past_key_value
 
 
-@add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
+@add_start_docstrings_to_model_forward("")
 def Qwen2Model_merge_then_fastv_cost_given_forward(
     self,
     input_ids: torch.LongTensor = None,

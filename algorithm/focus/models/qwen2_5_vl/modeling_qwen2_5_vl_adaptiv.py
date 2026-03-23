@@ -6,14 +6,16 @@ import torch.nn as nn
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 from transformers.models.qwen2.modeling_qwen2 import (
-    QWEN2_INPUTS_DOCSTRING,
     apply_rotary_pos_emb,
-    logger,
     repeat_kv,
 )
+from transformers.utils import logging as transformers_logging
 from transformers.utils.doc import add_start_docstrings_to_model_forward
 from focus.utils import naive_scaled_dot_product_attention, TEXT_TOKEN
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
+
+logger = transformers_logging.get_logger(__name__)
 from dataclasses import dataclass
 
 def rotate_half(x):
@@ -93,35 +95,13 @@ def Qwen2_5_VLDecoderLayer_adaptiv_forward(
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
-    past_key_value: Optional[Tuple[torch.Tensor]] = None,
+    past_key_values: Optional[Cache] = None,
     output_attentions: Optional[bool] = False,
     use_cache: Optional[bool] = False,
     cache_position: Optional[torch.LongTensor] = None,
-    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     **kwargs,
 ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-    """
-    Args:
-        hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
-        attention_mask (`torch.FloatTensor`, *optional*): attention mask of size
-            `(batch, sequence_length)` where padding elements are indicated by 0.
-        output_attentions (`bool`, *optional*):
-            Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-            returned tensors for more detail.
-        use_cache (`bool`, *optional*):
-            If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
-            (see `past_key_values`).
-        past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
-        cache_position (`torch.LongTensor` of shape `(sequence_length)`, *optional*):
-            Indices depicting the position of the input sequence tokens in the sequence.
-        position_embeddings (`Tuple[torch.FloatTensor, torch.FloatTensor]`, *optional*):
-            Tuple containing the cosine and sine positional embeddings of shape `(batch_size, seq_len, head_dim)`,
-            with `head_dim` being the embedding dimension of each attention head.
-        kwargs (`dict`, *optional*):
-            Arbitrary kwargs to be ignored, used for FSDP and other methods that injects code
-            into the model
-    """
-
     if self.self_attn.layer_idx == 0:
         hidden_states, position_embeddings, attention_mask = self.adaptiv(
             hidden_states, position_embeddings, attention_mask, name="pre_attn"
@@ -136,7 +116,7 @@ def Qwen2_5_VLDecoderLayer_adaptiv_forward(
         hidden_states=hidden_states,
         attention_mask=attention_mask,
         position_ids=position_ids,
-        past_key_value=past_key_value,
+        past_key_values=past_key_values,
         output_attentions=output_attentions,
         use_cache=use_cache,
         cache_position=cache_position,
@@ -161,7 +141,7 @@ def Qwen2_5_VLDecoderLayer_adaptiv_forward(
     ### end return the updated position embeddings and attention mask
 
 
-@add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
+@add_start_docstrings_to_model_forward("")
 def Qwen2_5_VLModel_adaptiv_forward(
     self,
     input_ids: torch.LongTensor = None,
@@ -192,13 +172,34 @@ def Qwen2_5_VLModel_adaptiv_forward(
     if cache_position is None:
         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
         cache_position = torch.arange(past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device)
+    # Handle 3D VL position_ids: [3, bs, seq] or [4, bs, seq]
     if position_ids is None:
-        position_ids = cache_position.unsqueeze(0)
-    causal_mask = self._update_causal_mask(attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions)
+        position_ids = cache_position.view(1, 1, -1).expand(3, inputs_embeds.shape[0], -1)
+    elif position_ids.ndim == 2:
+        position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+
+    if position_ids.ndim == 3 and position_ids.shape[0] == 4:
+        text_position_ids = position_ids[0]
+        position_ids = position_ids[1:]
+    else:
+        text_position_ids = None
+
+    # Build causal mask mapping (transformers 4.57+ API)
+    mask_kwargs = {
+        "config": self.config,
+        "input_embeds": inputs_embeds,
+        "attention_mask": attention_mask,
+        "cache_position": cache_position,
+        "past_key_values": past_key_values,
+        "position_ids": text_position_ids,
+    }
+    causal_mask_mapping = {"full_attention": create_causal_mask(**mask_kwargs)}
+    if self.has_sliding_layers:
+        causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
+
     hidden_states = inputs_embeds
     # create position embeddings to be shared across the decoder layers
     position_embeddings = self.rotary_emb(hidden_states, position_ids)
-    # decoder layers
     position_embeddings = list(position_embeddings)
 
     all_hidden_states = () if output_hidden_states else None
@@ -206,12 +207,15 @@ def Qwen2_5_VLModel_adaptiv_forward(
     for decoder_layer in self.layers[: self.config.num_hidden_layers]:
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
+
+        layer_attn_mask = causal_mask_mapping[decoder_layer.attention_type]
+
         if self.gradient_checkpointing and self.training:
             layer_outputs = self._gradient_checkpointing_func(
                 decoder_layer.__call__,
                 hidden_states,
-                causal_mask,
-                position_ids,
+                layer_attn_mask,
+                text_position_ids,
                 past_key_values,
                 output_attentions,
                 use_cache,
@@ -221,9 +225,9 @@ def Qwen2_5_VLModel_adaptiv_forward(
         else:
             layer_outputs = decoder_layer(
                 hidden_states,
-                attention_mask=causal_mask,
-                position_ids=position_ids,
-                past_key_value=past_key_values,
+                attention_mask=layer_attn_mask,
+                position_ids=text_position_ids,
+                past_key_values=past_key_values,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
@@ -231,9 +235,12 @@ def Qwen2_5_VLModel_adaptiv_forward(
                 **flash_attn_kwargs,
             )
 
-        ### start update the attention mask and position embeddings modified by Focus
+        ### start update the attention mask and position embeddings modified by Adaptiv
         position_embeddings = layer_outputs[-2]
-        causal_mask = layer_outputs[-1]
+        updated_mask = layer_outputs[-1]
+        if updated_mask is not layer_attn_mask:
+            for k in causal_mask_mapping:
+                causal_mask_mapping[k] = updated_mask
         ### end changing position embedding
         hidden_states = layer_outputs[0]
         if output_attentions:
@@ -260,29 +267,13 @@ def Qwen2_5_VLSdpaAttention_adaptiv_forward(
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
-    past_key_value: Optional[Cache] = None,
+    past_key_values: Optional[Cache] = None,
     output_attentions: bool = False,
     use_cache: bool = False,
     cache_position: Optional[torch.LongTensor] = None,
-    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-    if output_attentions:
-        # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
-        logger.warning_once(
-            "Qwen2_5_VLModel is using Qwen2_5_VLSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to the manual attention implementation, "
-            'but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
-        )
-        return super().forward(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            position_embeddings=position_embeddings,
-        )
-
     bsz, q_len, _ = hidden_states.size()
 
     query_states = self.q_proj(hidden_states)
@@ -298,9 +289,9 @@ def Qwen2_5_VLSdpaAttention_adaptiv_forward(
         query_states, key_states, cos, sin, self.rope_scaling["mrope_section"]
     )
 
-    if past_key_value is not None:
-        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
-        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+    if past_key_values is not None:
+        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+        key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -382,7 +373,7 @@ def Qwen2_5_VLForConditionalGeneration_adaptiv_forward(
     return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
     if inputs_embeds is None:
-        inputs_embeds = self.model.embed_tokens(input_ids)
+        inputs_embeds = self.model.get_input_embeddings()(input_ids)
         if pixel_values is not None:
             pixel_values = pixel_values.type(self.visual.dtype)
             image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
@@ -488,8 +479,10 @@ def Qwen2_5_VLForConditionalGeneration_adaptiv_forward(
             
             # Calculate metadata
             image_token_length = len(image_token_indices[0])
-            frame_stride = patch_height * patch_width
-            height_stride = patch_width
+            _ph = patch_height.item() if hasattr(patch_height, 'item') else int(patch_height)
+            _pw = patch_width.item() if hasattr(patch_width, 'item') else int(patch_width)
+            frame_stride = _ph * _pw
+            height_stride = _pw
             width_stride = 1
             
             image_token_start_index = image_token_indices[1][0] if len(image_token_indices[1]) > 0 else 0

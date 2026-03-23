@@ -6,13 +6,14 @@ from torch import nn
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.qwen2.modeling_qwen2 import (
-    QWEN2_INPUTS_DOCSTRING,
     apply_rotary_pos_emb,
-    logger,
     repeat_kv,
 )
 import math
+from transformers.utils import logging as transformers_logging
 from transformers.utils.doc import add_start_docstrings_to_model_forward
+
+logger = transformers_logging.get_logger(__name__)
 from focus.utils import naive_scaled_dot_product_attention
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
@@ -80,7 +81,7 @@ def Qwen2DecoderLayer_CMC_forward(
     return outputs
 
 
-@add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
+@add_start_docstrings_to_model_forward("")
 def Qwen2Model_CMC_forward(
     self,
     input_ids: torch.LongTensor = None,

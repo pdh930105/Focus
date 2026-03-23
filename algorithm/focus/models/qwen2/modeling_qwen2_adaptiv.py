@@ -6,13 +6,14 @@ import torch.nn as nn
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.qwen2.modeling_qwen2 import (
-    QWEN2_INPUTS_DOCSTRING,
     apply_rotary_pos_emb,
-    logger,
     repeat_kv,
 )
+from transformers.utils import logging as transformers_logging
 from transformers.utils.doc import add_start_docstrings_to_model_forward
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+logger = transformers_logging.get_logger(__name__)
 
 def Qwen2DecoderLayer_adaptiv_forward(
     self,
@@ -87,7 +88,7 @@ def Qwen2DecoderLayer_adaptiv_forward(
     ### end return the updated position embeddings and attention mask
 
 
-@add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
+@add_start_docstrings_to_model_forward("")
 def Qwen2Model_adaptiv_forward(
     self,
     input_ids: torch.LongTensor = None,

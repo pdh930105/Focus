@@ -192,7 +192,7 @@ def apply_focus(model, cli_args=None):
         else:
             raise NotImplementedError("Only focus and adaptiv are supported for Qwen2.5 VL models")
 
-        llm_key = "model"
+        llm_key = "model.language_model"
         decoder_key = "layers"
         attention_key = "self_attn"
         mlp_key = "mlp"

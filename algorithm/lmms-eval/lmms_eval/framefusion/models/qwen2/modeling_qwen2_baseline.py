@@ -8,15 +8,16 @@ import torch.utils.checkpoint
 from transformers.cache_utils import Cache, DynamicCache, SinkCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.qwen2.modeling_qwen2 import (
-    QWEN2_INPUTS_DOCSTRING,
+    Qwen2Attention as Qwen2SdpaAttention,
     Qwen2DecoderLayer,
     Qwen2Model,
-    Qwen2SdpaAttention,
     apply_rotary_pos_emb,
-    logger,
     repeat_kv,
 )
+from transformers.utils import logging as transformers_logging
 from transformers.utils.doc import add_start_docstrings_to_model_forward
+
+logger = transformers_logging.get_logger(__name__)
 
 try:
     from minference import streaming_forward
@@ -154,7 +155,7 @@ def replace_minicpmv_fastv(model, fastv_k=3, fastv_r=0.5):
             raise TypeError("language model is not Qwen2.")
 
 
-@add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
+@add_start_docstrings_to_model_forward("")
 def Qwen2Model_fastv_forward(
     self,
     input_ids: torch.LongTensor = None,
@@ -631,7 +632,7 @@ def Qwen2SdpaAttention_streamingllm_forward(
     return attn_output, None, past_key_value
 
 
-@add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
+@add_start_docstrings_to_model_forward("")
 def Qwen2Model_streamingllm_forward(
     self,
     input_ids: torch.LongTensor = None,
@@ -1091,7 +1092,7 @@ def Qwen2DecoderLayer_merging_forward(
     return outputs
 
 
-@add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
+@add_start_docstrings_to_model_forward("")
 def Qwen2Model_merging_forward(
     self,
     input_ids: torch.LongTensor = None,
@@ -1235,7 +1236,7 @@ def replace_Qwen2_merge_then_fastv(model, sparsity=[0.1] * 28, fastv_k=3, fastv_
             raise TypeError("language model is not Qwen2.")
 
 
-@add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
+@add_start_docstrings_to_model_forward("")
 def Qwen2Model_merge_then_fastv_forward(
     self,
     input_ids: torch.LongTensor = None,
@@ -1912,7 +1913,7 @@ def replace_Qwen2_fastv_then_merge(model, fastv_k=2, fastv_r=0.75, merging_spars
             raise TypeError("language model is not Qwen2.")
 
 
-@add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
+@add_start_docstrings_to_model_forward("")
 def Qwen2Model_fastv_then_merge_forward(
     self,
     input_ids: torch.LongTensor = None,
