@@ -220,22 +220,32 @@ class MiniCPM_V(lmms):
 
             # --- Begin video/image handling ---
             path = visual_paths[0]
-            ext = os.path.splitext(path)[-1].lower()
-            is_video = ext in [".mp4", ".avi", ".mov", ".mkv", ".webm"]
-            if is_video:
-                frames = encode_video(path)
-                self.model.num_frames = len(frames)
-                msgs = [{"role": "user", "content": frames + [context]}]
-                gen_kwargs.setdefault("use_image_id", False)
-                gen_kwargs.setdefault("max_slice_nums", 2)
-                image_arg = None
-            else:
-                # Assume image
-                image = Image.open(path).convert("RGB")
+            if isinstance(path, Image.Image):
+                # Already a PIL Image
+                image = path.convert("RGB")
                 if "<image>" in context:
                     context = context.replace("<image>", "")
                 msgs = [{"role": "user", "content": context}]
                 image_arg = image
+                self.model.num_frames = 1
+            else:
+                ext = os.path.splitext(path)[-1].lower()
+                is_video = ext in [".mp4", ".avi", ".mov", ".mkv", ".webm"]
+                if is_video:
+                    frames = encode_video(path)
+                    self.model.num_frames = len(frames)
+                    msgs = [{"role": "user", "content": frames + [context]}]
+                    gen_kwargs.setdefault("use_image_id", False)
+                    gen_kwargs.setdefault("max_slice_nums", 2)
+                    image_arg = None
+                else:
+                    # Assume image path
+                    image = Image.open(path).convert("RGB")
+                    if "<image>" in context:
+                        context = context.replace("<image>", "")
+                    msgs = [{"role": "user", "content": context}]
+                    image_arg = image
+                    self.model.num_frames = 1
             # --- End video/image handling ---
 
             if "max_new_tokens" not in gen_kwargs:

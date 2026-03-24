@@ -537,5 +537,5 @@ def Qwen2_5_VLForConditionalGeneration_adaptiv_forward(
         past_key_values=outputs.past_key_values,
         hidden_states=outputs.hidden_states,
         attentions=outputs.attentions,
-        rope_deltas=self.rope_deltas,
+        rope_deltas=getattr(outputs, 'rope_deltas', None),
     )

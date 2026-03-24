@@ -12,6 +12,7 @@ from transformers.models.qwen2.modeling_qwen2 import (
 from transformers.utils import logging as transformers_logging
 from transformers.utils.doc import add_start_docstrings_to_model_forward
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
 logger = transformers_logging.get_logger(__name__)
 
@@ -20,11 +21,11 @@ def Qwen2DecoderLayer_focus_forward(
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
-    past_key_value: Optional[Tuple[torch.Tensor]] = None,
+    past_key_values: Optional[Cache] = None,
     output_attentions: Optional[bool] = False,
     use_cache: Optional[bool] = False,
     cache_position: Optional[torch.LongTensor] = None,
-    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     **kwargs,
 ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
     """
@@ -58,7 +59,7 @@ def Qwen2DecoderLayer_focus_forward(
         hidden_states=hidden_states,
         attention_mask=attention_mask,
         position_ids=position_ids,
-        past_key_value=past_key_value,
+        past_key_values=past_key_values,
         output_attentions=output_attentions,
         use_cache=use_cache,
         cache_position=cache_position,
@@ -123,7 +124,17 @@ def Qwen2Model_focus_forward(
         cache_position = torch.arange(past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device)
     if position_ids is None:
         position_ids = cache_position.unsqueeze(0)
-    causal_mask = self._update_causal_mask(attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions)
+    mask_kwargs = {
+        "config": self.config,
+        "input_embeds": inputs_embeds,
+        "attention_mask": attention_mask,
+        "cache_position": cache_position,
+        "past_key_values": past_key_values,
+        "position_ids": position_ids,
+    }
+    causal_mask_mapping = {"full_attention": create_causal_mask(**mask_kwargs)}
+    if getattr(self, "has_sliding_layers", False):
+        causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
     hidden_states = inputs_embeds
     # create position embeddings to be shared across the decoder layers
     position_embeddings = self.rotary_emb(hidden_states, position_ids)
@@ -135,11 +146,12 @@ def Qwen2Model_focus_forward(
     for decoder_layer in self.layers[: self.config.num_hidden_layers]:
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
+        layer_attn_mask = causal_mask_mapping[getattr(decoder_layer, "attention_type", "full_attention")]
         if self.gradient_checkpointing and self.training:
             layer_outputs = self._gradient_checkpointing_func(
                 decoder_layer.__call__,
                 hidden_states,
-                causal_mask,
+                layer_attn_mask,
                 position_ids,
                 past_key_values,
                 output_attentions,
@@ -150,9 +162,9 @@ def Qwen2Model_focus_forward(
         else:
             layer_outputs = decoder_layer(
                 hidden_states,
-                attention_mask=causal_mask,
+                attention_mask=layer_attn_mask,
                 position_ids=position_ids,
-                past_key_value=past_key_values,
+                past_key_values=past_key_values,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
@@ -162,7 +174,10 @@ def Qwen2Model_focus_forward(
 
         ### start update the attention mask and position embeddings modified by Focus
         position_embeddings = layer_outputs[-2]
-        causal_mask = layer_outputs[-1]
+        updated_mask = layer_outputs[-1]
+        if updated_mask is not layer_attn_mask:
+            for k in causal_mask_mapping:
+                causal_mask_mapping[k] = updated_mask
         ### end changing position embedding
         hidden_states = layer_outputs[0]
         if output_attentions:
@@ -189,7 +204,7 @@ def Qwen2SdpaAttention_focus_forward(
     hidden_states: torch.Tensor,
     position_embeddings: Tuple[torch.Tensor, torch.Tensor],
     attention_mask: Optional[torch.Tensor],
-    past_key_value: Optional[Cache] = None,
+    past_key_values: Optional[Cache] = None,
     cache_position: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -207,18 +222,12 @@ def Qwen2SdpaAttention_focus_forward(
     cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-    if past_key_value is not None:
+    if past_key_values is not None:
         # sin and cos are specific to RoPE models; cache_position needed for the static cache
         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-    sliding_window = None
-    if (
-        self.config.use_sliding_window
-        and getattr(self.config, "sliding_window", None) is not None
-        and self.layer_idx >= self.config.max_window_layers
-    ):
-        sliding_window = self.config.sliding_window
+    sliding_window = getattr(self, "sliding_window", None)
 
     attention_interface: Callable = qwen_attention_forward
     if self.config._attn_implementation != "eager":

@@ -403,16 +403,16 @@ class Focus(nn.Module):
         # Validate token_importance
         if self.token_importance.shape[0] == 0:
             raise ValueError("token_importance is empty")
-        
+
         if k > self.token_importance.shape[0]:
             k = self.token_importance.shape[0]
 
         try:
-            retained_ids_local = torch.topk(self.token_importance, k=k)[1]
+            retained_ids_local = torch.topk(self.token_importance, k=k)[1].to(device)
             # sort the retained ids
             retained_ids_local = torch.sort(retained_ids_local)[0]
 
-            retained_ids = self.retained_ids if self.retained_ids is not None else torch.arange(0, seq_len, device=device)
+            retained_ids = self.retained_ids.to(device) if self.retained_ids is not None else torch.arange(0, seq_len, device=device)
             
             # Validate retained_ids structure
             if retained_ids.shape[0] < self.image_token_start_index + self.query_token_length:
@@ -685,16 +685,17 @@ class Focus(nn.Module):
     
     def recover_PE_and_AM(self, position_embeddings, attention_mask):
         assert self.retained_ids.shape[0] == position_embeddings[0].shape[-2], "The number of retained ids must be equal to the number of tokens in the position embeddings."
-        
+        retained_ids = self.retained_ids.to(position_embeddings[0].device)
+
         # Handle position embeddings based on their dimensions
         if position_embeddings[0].dim() == 3:
             # 3D case: (B, seq_len, C)
             B, _, C = position_embeddings[0].shape
             tmp = torch.zeros(B, self.original_length, C, device=position_embeddings[0].device, dtype=position_embeddings[0].dtype)
-            tmp[:, self.retained_ids, :] = position_embeddings[0]
+            tmp[:, retained_ids, :] = position_embeddings[0]
             position_embeddings[0] = tmp
             tmp = torch.zeros(B, self.original_length, C, device=position_embeddings[1].device, dtype=position_embeddings[1].dtype)
-            tmp[:, self.retained_ids, :] = position_embeddings[1]
+            tmp[:, retained_ids.to(position_embeddings[1].device), :] = position_embeddings[1]
             position_embeddings[1] = tmp
         elif position_embeddings[0].dim() == 4:
             # Check if this is the special Qwen2.5-VL case: (3, B, seq_len, C)
@@ -702,25 +703,26 @@ class Focus(nn.Module):
                 # Special Qwen2.5-VL case: (3, B, seq_len, C)
                 _, B, _, C = position_embeddings[0].shape
                 tmp = torch.zeros(3, B, self.original_length, C, device=position_embeddings[0].device, dtype=position_embeddings[0].dtype)
-                tmp[:, :, self.retained_ids, :] = position_embeddings[0]
+                tmp[:, :, retained_ids, :] = position_embeddings[0]
                 position_embeddings[0] = tmp
                 tmp = torch.zeros(3, B, self.original_length, C, device=position_embeddings[1].device, dtype=position_embeddings[1].dtype)
-                tmp[:, :, self.retained_ids, :] = position_embeddings[1]
+                tmp[:, :, retained_ids.to(position_embeddings[1].device), :] = position_embeddings[1]
                 position_embeddings[1] = tmp
             else:
                 # General 4D case: (B, H, seq_len, C)
                 B, H, _, C = position_embeddings[0].shape
                 tmp = torch.zeros(B, H, self.original_length, C, device=position_embeddings[0].device, dtype=position_embeddings[0].dtype)
-                tmp[:, :, self.retained_ids, :] = position_embeddings[0]
+                tmp[:, :, retained_ids, :] = position_embeddings[0]
                 position_embeddings[0] = tmp
                 tmp = torch.zeros(B, H, self.original_length, C, device=position_embeddings[1].device, dtype=position_embeddings[1].dtype)
-                tmp[:, :, self.retained_ids, :] = position_embeddings[1]
+                tmp[:, :, retained_ids.to(position_embeddings[1].device), :] = position_embeddings[1]
                 position_embeddings[1] = tmp
         else:
             raise ValueError(f"Unsupported position_embeddings dimension: {position_embeddings[0].dim()}")
         if attention_mask is not None:
+            am_retained_ids = retained_ids.to(attention_mask.device)
             tmp = torch.zeros(B, B, self.original_length, self.original_length, device=attention_mask.device, dtype=attention_mask.dtype)
-            tmp[:, :, self.retained_ids, :][:, :, :, self.retained_ids] = attention_mask
+            tmp[:, :, am_retained_ids, :][:, :, :, am_retained_ids] = attention_mask
             attention_mask = tmp
         return position_embeddings, attention_mask
 
@@ -730,19 +732,20 @@ class Focus(nn.Module):
         """
         Recover the full hidden_states by restoring the pruned positions with zeros.
         """
+        retained_ids = self.retained_ids.to(hidden_states.device)
         # Create a zero tensor of the original shape
         if hidden_states.dim() == 3:
             B, _, C = hidden_states.shape
             recovered = torch.zeros(B, self.original_length, C, device=hidden_states.device, dtype=hidden_states.dtype)
-        
+
             # Scatter the retained hidden states back to their original positions
-            recovered[:, self.retained_ids, :] = hidden_states
+            recovered[:, retained_ids, :] = hidden_states
 
         elif hidden_states.dim() == 4:
             B, H, _, C = hidden_states.shape
             recovered = torch.zeros(B, H, self.original_length, C, device=hidden_states.device, dtype=hidden_states.dtype)
             # Scatter the retained hidden states back to their original positions
-            recovered[:, :, self.retained_ids, :] = hidden_states
+            recovered[:, :, retained_ids, :] = hidden_states
 
         else:
             raise ValueError("hidden_states must be 3D or 4D tensor.")
@@ -753,18 +756,19 @@ class Focus(nn.Module):
         """
         Drop the tokens that are not retained.
         """
+        retained_ids = self.retained_ids.to(hidden_states.device)
         if hidden_states.dim() == 3:
-            dropped = hidden_states[:, self.retained_ids, :]
+            dropped = hidden_states[:, retained_ids, :]
             # make contiguous
             dropped = dropped.contiguous()
         elif hidden_states.dim() == 4:
 
-            dropped = hidden_states[:, :, self.retained_ids, :]
+            dropped = hidden_states[:, :, retained_ids, :]
             # make contiguous
             dropped = dropped.contiguous()
         else:
             raise ValueError("hidden_states must be 3D or 4D tensor.")
-        
+
         return dropped
 
     def _compute_gemm_m_tile_indices(

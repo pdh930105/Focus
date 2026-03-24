@@ -565,7 +565,7 @@ def Qwen2_5_VLForConditionalGeneration_focus_forward(
         past_key_values=outputs.past_key_values,
         hidden_states=outputs.hidden_states,
         attentions=outputs.attentions,
-        rope_deltas=self.rope_deltas,
+        rope_deltas=getattr(outputs, 'rope_deltas', None),
     )
 
 def prepare_inputs_labels_for_multimodal_qwen2_5_vl(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, modalities=["image"], image_sizes=None):
